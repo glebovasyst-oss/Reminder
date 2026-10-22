@@ -50,21 +50,34 @@ def _show_notification(title: str, message: str) -> None:
             root.destroy()
 
 
+def _format_message(reminder: dict) -> str:
+    """Текст уведомления: описание + пометка о повторе."""
+    message = reminder["description"] or "Без описания"
+    repeat_rule = reminder.get("repeat_rule") or ""
+    if repeat_rule:
+        message = f"{message}\nПовтор: {repeat_rule.lower()}"
+    return message
+
+
 def _check_loop() -> None:
     """Главный цикл потока: проверяет наступившие напоминания."""
     while _running.is_set():
-        # Сначала помечаем просроченные
-        db.mark_overdue()
-
-        # Берём напоминания, чьё время пришло
+        # Сначала показываем уведомления, иначе mark_overdue() успеет
+        # перевести их в «Просрочено» до показа.
         due = db.get_pending_reminders()
         for r in due:
-            msg = r["description"] or "Без описания"
-            _show_notification(r["title"], msg)
-            # Помечаем как "Просрочено", чтобы не повторять уведомление
-            db.update_status(r["id"], "Просрочено")
+            _show_notification(r["title"], _format_message(r))
+            # Повторяющееся — переносим на следующий цикл, разовое — в «Просрочено»,
+            # чтобы не показывать уведомление повторно.
+            new_due = db.advance_reminder(r["id"], after=datetime.now())
+            if new_due is None:
+                db.update_status(r["id"], "Просрочено")
 
-        time.sleep(CHECK_INTERVAL)
+        # Страховка для записей, которые не удалось обработать выше.
+        db.mark_overdue()
+
+        # Ждём следующий цикл; при остановке просыпаемся сразу.
+        _running.wait(CHECK_INTERVAL)
 
 
 def start() -> None:

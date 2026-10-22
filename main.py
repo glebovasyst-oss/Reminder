@@ -4,11 +4,18 @@ main.py — точка входа. Интерфейс на tkinter, связыв
 """
 
 import tkinter as tk
-from tkinter import ttk, messagebox, simpledialog
+from tkinter import ttk, messagebox
 from datetime import datetime, timedelta
 
 import db
 import notifications
+
+# Быстрые действия в диалоге добавления: подпись → сдвиг от текущего момента
+QUICK_DELTAS = {
+    "+30м": timedelta(minutes=30),
+    "+1ч": timedelta(hours=1),
+    "+1д": timedelta(days=1),
+}
 
 
 class ReminderApp:
@@ -17,8 +24,8 @@ class ReminderApp:
     def __init__(self, root: tk.Tk):
         self.root = root
         self.root.title("Напоминалка")
-        self.root.geometry("720x480")
-        self.root.minsize(560, 360)
+        self.root.geometry("820x520")
+        self.root.minsize(640, 400)
 
         # Инициализация БД
         db.init_db()
@@ -51,6 +58,9 @@ class ReminderApp:
         ttk.Button(
             btn_frame, text="Отменить", command=self._mark_cancelled
         ).pack(side=tk.LEFT, padx=2)
+        ttk.Button(
+            btn_frame, text="Отложить +30 мин", command=self._snooze
+        ).pack(side=tk.LEFT, padx=2)
         ttk.Button(btn_frame, text="Обновить", command=self._refresh_list).pack(
             side=tk.LEFT, padx=2
         )
@@ -72,7 +82,7 @@ class ReminderApp:
         self.filter_combo.bind("<<ComboboxSelected>>", lambda e: self._refresh_list())
 
         # --- Таблица ---
-        columns = ("id", "title", "description", "due_at", "status")
+        columns = ("id", "title", "description", "due_at", "repeat_rule", "status")
         self.tree = ttk.Treeview(
             self.root, columns=columns, show="headings", selectmode="browse"
         )
@@ -81,12 +91,14 @@ class ReminderApp:
         self.tree.heading("title", text="Заголовок")
         self.tree.heading("description", text="Описание")
         self.tree.heading("due_at", text="Когда")
+        self.tree.heading("repeat_rule", text="Повтор")
         self.tree.heading("status", text="Статус")
 
         self.tree.column("id", width=40, anchor=tk.CENTER)
-        self.tree.column("title", width=180)
-        self.tree.column("description", width=240)
-        self.tree.column("due_at", width=130, anchor=tk.CENTER)
+        self.tree.column("title", width=170)
+        self.tree.column("description", width=210)
+        self.tree.column("due_at", width=120, anchor=tk.CENTER)
+        self.tree.column("repeat_rule", width=100, anchor=tk.CENTER)
         self.tree.column("status", width=90, anchor=tk.CENTER)
 
         self.tree.pack(fill=tk.BOTH, expand=True, padx=8, pady=(4, 8))
@@ -116,20 +128,34 @@ class ReminderApp:
         )
 
         for r in reminders:
+            repeat_rule = r.get("repeat_rule") or "—"
             self.tree.insert(
                 "",
                 tk.END,
-                values=(r["id"], r["title"], r["description"], r["due_at"], r["status"]),
+                values=(
+                    r["id"],
+                    r["title"],
+                    r["description"],
+                    r["due_at"],
+                    repeat_rule,
+                    r["status"],
+                ),
                 tags=(r["status"],),
             )
 
         self.status_var.set(f"Всего записей: {len(reminders)}")
 
+    def _selected_values(self) -> tuple[str, ...] | None:
+        selected = self.tree.selection()
+        if not selected:
+            return None
+        return self.tree.item(selected[0], "values")
+
     def _add_dialog(self) -> None:
         """Диалог добавления напоминания."""
         dialog = tk.Toplevel(self.root)
         dialog.title("Новое напоминание")
-        dialog.geometry("380x320")
+        dialog.geometry("400x390")
         dialog.resizable(False, False)
         dialog.transient(self.root)
         dialog.grab_set()
@@ -148,33 +174,42 @@ class ReminderApp:
         time_frame = ttk.Frame(dialog)
         time_frame.pack(pady=2)
 
-        # По умолчанию — через час
-        default_dt = (datetime.now() + timedelta(hours=1)).strftime("%Y-%m-%d %H:%M")
-        time_entry = ttk.Entry(time_frame, width=22)
+        # По умолчанию — через 30 минут
+        default_dt = (datetime.now() + QUICK_DELTAS["+30м"]).strftime(
+            "%Y-%m-%d %H:%M"
+        )
+        time_entry = ttk.Entry(time_frame, width=20)
         time_entry.insert(0, default_dt)
         time_entry.pack(side=tk.LEFT, padx=4)
 
-        ttk.Button(
-            time_frame,
-            text="+1ч",
-            width=4,
-            command=lambda: time_entry.delete(0, tk.END)
-            or time_entry.insert(
-                0,
-                (datetime.now() + timedelta(hours=1)).strftime("%Y-%m-%d %H:%M"),
-            ),
-        ).pack(side=tk.LEFT, padx=2)
+        def fill_time(delta: timedelta) -> None:
+            time_entry.delete(0, tk.END)
+            time_entry.insert(
+                0, (datetime.now() + delta).strftime("%Y-%m-%d %H:%M")
+            )
 
-        ttk.Button(
-            time_frame,
-            text="+1д",
-            width=4,
-            command=lambda: time_entry.delete(0, tk.END)
-            or time_entry.insert(
-                0,
-                (datetime.now() + timedelta(days=1)).strftime("%Y-%m-%d %H:%M"),
-            ),
-        ).pack(side=tk.LEFT, padx=2)
+        for label, delta in QUICK_DELTAS.items():
+            ttk.Button(
+                time_frame,
+                text=label,
+                width=5,
+                command=lambda d=delta: fill_time(d),
+            ).pack(side=tk.LEFT, padx=2)
+
+        # Повтор
+        repeat_frame = ttk.Frame(dialog)
+        repeat_frame.pack(pady=(8, 2))
+
+        ttk.Label(repeat_frame, text="Повтор:").pack(side=tk.LEFT, padx=(0, 6))
+        repeat_var = tk.StringVar(value="Нет")
+        repeat_combo = ttk.Combobox(
+            repeat_frame,
+            textvariable=repeat_var,
+            state="readonly",
+            width=18,
+            values=["Нет", db.REPEAT_DAILY, db.REPEAT_WEEKLY, db.REPEAT_MONTHLY],
+        )
+        repeat_combo.pack(side=tk.LEFT)
 
         error_label = ttk.Label(dialog, text="", foreground="red")
         error_label.pack()
@@ -183,6 +218,7 @@ class ReminderApp:
             title = title_entry.get().strip()
             description = desc_text.get("1.0", tk.END).strip()
             due_at = time_entry.get().strip()
+            repeat_rule = "" if repeat_var.get() == "Нет" else repeat_var.get()
 
             if not title:
                 error_label.config(text="Введите заголовок")
@@ -195,20 +231,22 @@ class ReminderApp:
                 error_label.config(text="Формат: ГГГГ-ММ-ДД ЧЧ:ММ")
                 return
 
-            db.add_reminder(title, description, due_at)
+            db.add_reminder(title, description, due_at, repeat_rule)
             dialog.destroy()
             self._refresh_list()
-            messagebox.showinfo("Добавлено", f"Напоминание «{title}» добавлено.")
+            repeat_note = f"\nПовтор: {repeat_rule.lower()}." if repeat_rule else ""
+            messagebox.showinfo(
+                "Добавлено", f"Напоминание «{title}» добавлено.{repeat_note}"
+            )
 
         ttk.Button(dialog, text="Сохранить", command=save).pack(pady=10)
 
     def _delete_selected(self) -> None:
-        selected = self.tree.selection()
-        if not selected:
+        values = self._selected_values()
+        if values is None:
             messagebox.showwarning("Удаление", "Выберите напоминание для удаления.")
             return
 
-        values = self.tree.item(selected[0], "values")
         if messagebox.askyesno(
             "Удаление", f"Удалить напоминание «{values[1]}»?"
         ):
@@ -222,13 +260,38 @@ class ReminderApp:
         self._change_status("Отменено")
 
     def _change_status(self, status: str) -> None:
-        selected = self.tree.selection()
-        if not selected:
+        values = self._selected_values()
+        if values is None:
             messagebox.showwarning("Статус", "Выберите напоминание.")
             return
-        values = self.tree.item(selected[0], "values")
-        db.update_status(int(values[0]), status)
+
+        reminder_id = int(values[0])
+        if status == "Готово":
+            # Повторяющееся напоминание не завершается, а переносится на след. цикл
+            new_due = db.complete_reminder(reminder_id)
+            message = (
+                f"Следующее срабатывание: {new_due}"
+                if new_due
+                else "Напоминание отмечено как «Готово»."
+            )
+        else:
+            db.update_status(reminder_id, status)
+            message = f"Статус изменён на «{status}»."
+
         self._refresh_list()
+        self.status_var.set(message)
+
+    def _snooze(self) -> None:
+        """Откладывает выбранное напоминание на 30 минут."""
+        values = self._selected_values()
+        if values is None:
+            messagebox.showwarning("Отложить", "Выберите напоминание.")
+            return
+
+        new_due = db.snooze_reminder(int(values[0]), minutes=30)
+        self._refresh_list()
+        if new_due:
+            self.status_var.set(f"Отложено до {new_due}")
 
     def _on_close(self) -> None:
         notifications.stop()
@@ -237,7 +300,7 @@ class ReminderApp:
 
 def main() -> None:
     root = tk.Tk()
-    app = ReminderApp(root)
+    ReminderApp(root)
     root.mainloop()
 
 
